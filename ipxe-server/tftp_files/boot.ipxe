@@ -1,0 +1,34 @@
+#!ipxe
+
+set boot-url http://${next-server}
+
+:MENU
+menu 
+item --gap ***************** iPXE Boot Server *****************
+item winpe Boot Windows Installer
+item linux Boot Linux Installer
+item shell iPXE Shell
+item exit Exit
+
+choose --default return --timeout 5000 target && goto ${target}
+
+:winpe
+echo Booting to Windows Installer
+chain tftp://${next-server}/winpe.ipxe
+goto MENU
+
+:linux
+echo Booting to Linux Installer
+chain tftp://${next-server}/linux.ipxe
+goto MENU
+
+
+:shell
+shell ||
+goto MENU
+
+:exit
+exit
+
+:return
+autoboot

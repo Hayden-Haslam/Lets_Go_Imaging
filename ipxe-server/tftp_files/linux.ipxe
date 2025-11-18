@@ -1,0 +1,18 @@
+#!ipxe
+
+set linux-url ${boot-url}/images/linux
+
+echo
+echo Loading Linux kernel...
+kernel ${linux-url}/vmlinuz initrd=initrd.img root=/dev/ram0 ip=dhcp
+
+echo Loading initial RAM disk...
+initrd ${linux-url}/initrd.img
+
+echo Booting...
+boot || goto failed
+
+:failed
+echo Booting Linux failed, returning to menu...
+sleep 3
+chain tftp://${next-server}/boot.ipxe

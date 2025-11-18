@@ -1,0 +1,24 @@
+#!ipxe
+
+set win-url ${boot-url}/images/winpe
+
+echo
+echo Loading Windows kernel...
+kernel ${win-url}/wimboot         gui
+
+echo
+echo Loading initial RAM disk and other required files...
+#initrd ${win-url}/winpeshl.ini    winpeshl.ini
+#initrd ${win-url}/install.bat     install.bat
+initrd ${win-url}/bcd             BCD
+initrd ${win-url}/boot.sdi        boot.sdi
+initrd ${win-url}/boot.wim        boot.wim
+
+echo
+echo Booting...
+boot || goto failed
+
+:failed
+echo Booting failed, returning to menu...
+sleep 3
+chain tftp://${next-server}/boot.ipxe
