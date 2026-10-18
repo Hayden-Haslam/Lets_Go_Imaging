@@ -1,13 +1,22 @@
 module ipxe-server
 
-go 1.25.4
-
-require github.com/lpar/gzipped v1.1.0
+go 1.26.0
 
 require (
+	github.com/lpar/gzipped v1.1.0
+	github.com/pin/tftp v2.1.0+incompatible
+	modernc.org/sqlite v1.60.1
+)
+
+require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/golang/gddo v0.0.0-20210115222349-20d68f94ee1f // indirect
-	github.com/pin/tftp v2.1.0+incompatible // indirect
-	github.com/pin/tftp/v3 v3.1.0 // indirect
-	golang.org/x/net v0.0.0-20200202094626-16171245cfb2 // indirect
-	golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	modernc.org/libc v1.77.1 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )

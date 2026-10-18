@@ -1,0 +1,227 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+)
+
+const configFilePath = "config.json"
+
+// ServerConfig stores persistent server settings configured via the CLI wizard or Web UI.
+type ServerConfig struct {
+	ServerIP                 string `json:"server_ip"`
+	TFTPPort                 int    `json:"tftp_port"`
+	HTTPPort                 int    `json:"http_port"`
+	RubyWebPort              int    `json:"ruby_web_port"`
+	DefaultWim               string `json:"default_wim"`
+	LinuxKernelArgs          string `json:"linux_kernel_args"`
+	MenuTimeoutMs            int    `json:"menu_timeout_ms"`
+	AutoLaunchWinPEInstaller bool   `json:"auto_launch_winpe_installer"`
+	TFTPDir                  string `json:"tftp_dir"`
+	HTTPDir                  string `json:"http_dir"`
+	DBPath                   string `json:"db_path"`
+	SetupCompleted           bool   `json:"setup_completed"`
+}
+
+var (
+	configMu  sync.RWMutex
+	appConfig ServerConfig
+)
+
+// DefaultConfig returns sensible defaults for Lets_Go_Imaging.
+func DefaultConfig() ServerConfig {
+	detectedIP := detectPrimaryIPv4()
+	if detectedIP == "" {
+		detectedIP = "192.168.1.10"
+	}
+	return ServerConfig{
+		ServerIP:                 detectedIP,
+		TFTPPort:                 69,
+		HTTPPort:                 80,
+		RubyWebPort:              4567,
+		DefaultWim:               "boot.wim",
+		LinuxKernelArgs:          "initrd=initrd.img root=/dev/ram0 ip=dhcp",
+		MenuTimeoutMs:            10000,
+		AutoLaunchWinPEInstaller: false,
+		TFTPDir:                  "tftp_files",
+		HTTPDir:                  "http_files",
+		DBPath:                   "imaging.db",
+		SetupCompleted:           false,
+	}
+}
+
+// GetConfig returns a thread-safe copy of the current configuration.
+func GetConfig() ServerConfig {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return appConfig
+}
+
+// LoadConfig reads config.json from disk, returning (config, exists, error).
+func LoadConfig() (ServerConfig, bool, error) {
+	cfg := DefaultConfig()
+	data, err := os.ReadFile(configFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			configMu.Lock()
+			appConfig = cfg
+			configMu.Unlock()
+			return cfg, false, nil
+		}
+		return cfg, false, err
+	}
+
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, true, err
+	}
+
+	if cfg.TFTPDir == "" {
+		cfg.TFTPDir = "tftp_files"
+	}
+	if cfg.HTTPDir == "" {
+		cfg.HTTPDir = "http_files"
+	}
+	if cfg.DBPath == "" {
+		cfg.DBPath = "imaging.db"
+	}
+	if cfg.DefaultWim == "" {
+		cfg.DefaultWim = "boot.wim"
+	}
+	if cfg.MenuTimeoutMs <= 0 {
+		cfg.MenuTimeoutMs = 10000
+	}
+
+	configMu.Lock()
+	appConfig = cfg
+	configMu.Unlock()
+
+	return cfg, true, nil
+}
+
+// SaveConfig persists the configuration to config.json and updates tftp_files/boot.ipxe.
+func SaveConfig(cfg ServerConfig) error {
+	configMu.Lock()
+	appConfig = cfg
+	configMu.Unlock()
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(configFilePath, data, 0644); err != nil {
+		return err
+	}
+
+	return syncTFTPBootScript(cfg)
+}
+
+// syncTFTPBootScript writes tftp_files/boot.ipxe so TFTP clients immediately chainload
+// the dynamic HTTP menu while passing SMBIOS hardware identifiers (MAC, Manufacturer, Model, Serial, UUID, Arch).
+func syncTFTPBootScript(cfg ServerConfig) error {
+	if err := os.MkdirAll(cfg.TFTPDir, 0755); err != nil {
+		return err
+	}
+
+	portPart := ""
+	if cfg.HTTPPort != 80 && cfg.HTTPPort > 0 {
+		portPart = fmt.Sprintf(":%d", cfg.HTTPPort)
+	}
+
+	script := fmt.Sprintf(`#!ipxe
+
+# Resolve boot server address (prefers DHCP next-server, falls back to configured IP %s)
+isset ${next-server} || set next-server %s
+set boot-url http://${next-server}%s
+
+echo ==========================================================
+echo  Lets Go Imaging - Collecting Hardware Info & Connecting...
+echo  MAC: ${net0/mac} | Manufacturer: ${manufacturer} | Model: ${product}
+echo ==========================================================
+
+chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac:uristring}&ip=${ip:uristring}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid:uristring}&arch=${buildarch:uristring} || goto fallback
+
+:fallback
+echo Dynamic HTTP menu unreachable on ${boot-url}, falling back to local static menu...
+menu Lets Go Imaging (Fallback Mode)
+item winpe Boot Windows Installer (WinPE)
+item linux Boot Linux Installer
+item shell Drop to iPXE Shell
+item exit  Exit to Local Boot
+choose --default winpe --timeout %d target && goto ${target}
+
+:winpe
+chain tftp://${next-server}/winpe.ipxe || goto fallback
+
+:linux
+chain tftp://${next-server}/linux.ipxe || goto fallback
+
+:shell
+shell
+
+:exit
+exit
+`, cfg.ServerIP, cfg.ServerIP, portPart, cfg.MenuTimeoutMs)
+
+	bootIpxePath := filepath.Join(cfg.TFTPDir, "boot.ipxe")
+	return os.WriteFile(bootIpxePath, []byte(script), 0644)
+}
+
+// NetworkInterfaceOption represents a detected local network interface and IPv4 address.
+type NetworkInterfaceOption struct {
+	Name string `json:"name"`
+	IP   string `json:"ip"`
+	MAC  string `json:"mac"`
+}
+
+// ListNetworkInterfaces returns all non-loopback IPv4 interfaces on the host.
+func ListNetworkInterfaces() []NetworkInterfaceOption {
+	var options []NetworkInterfaceOption
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return options
+	}
+
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ip == nil || ip.IsLoopback() {
+				continue
+			}
+			ipv4 := ip.To4()
+			if ipv4 == nil {
+				continue
+			}
+			options = append(options, NetworkInterfaceOption{
+				Name: iface.Name,
+				IP:   ipv4.String(),
+				MAC:  iface.HardwareAddr.String(),
+			})
+		}
+	}
+	return options
+}
+
+func detectPrimaryIPv4() string {
+	opts := ListNetworkInterfaces()
+	if len(opts) > 0 {
+		return opts[0].IP
+	}
+	return ""
+}

@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lets Go Imaging — iPXE Management Portal</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">LGI</div>
+      <div>
+        <h1>Lets Go Imaging</h1>
+        <p class="subtitle">Go iPXE Boot Server &amp; Ruby Sinatra Management Console</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="backend-badge" class="status-pill <%= @backend_online ? 'online' : 'offline' %>">
+        <%= @backend_online ? 'Go Server Online' : 'Go Server Offline' %>
+      </span>
+      <button class="btn btn-secondary" onclick="simulateBoot()" title="Simulate a PXE client hardware check-in and WIM download">
+        ⚡ Simulate PXE Client Boot
+      </button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard &amp; Live Transfers</button>
+    <button class="tab-btn" data-tab="images" onclick="switchTab('images')">Image Management (WIM &amp; Linux)</button>
+    <button class="tab-btn" data-tab="devices" onclick="switchTab('devices')">Hardware Inventory &amp; Devices</button>
+    <button class="tab-btn" data-tab="logs" onclick="switchTab('logs')">Server &amp; PXE Logs</button>
+    <button class="tab-btn" data-tab="setup" onclick="switchTab('setup')">Setup &amp; Startup (AlmaLinux 10)</button>
+  </nav>
+
+  <main class="container">
+    <div id="toast" class="toast hidden"></div>
+
+    <!-- TAB 1: DASHBOARD & LIVE TRANSFERS -->
+    <section id="tab-dashboard" class="tab-panel active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">iPXE Boot Server IP</span>
+          <strong class="stat-value" id="stat-server-ip">--</strong>
+          <span class="stat-sub" id="stat-ports">TFTP :69 | HTTP :80</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Windows WinPE Status</span>
+          <strong class="stat-value" id="stat-winpe-status">--</strong>
+          <span class="stat-sub" id="stat-default-wim">Default: boot.wim</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Linux Boot Status</span>
+          <strong class="stat-value" id="stat-linux-status">--</strong>
+          <span class="stat-sub">vmlinuz + initrd.img</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Discovered PXE Devices</span>
+          <strong class="stat-value" id="stat-device-count">0</strong>
+          <span class="stat-sub">Hardware logged via SMBIOS</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2>Active &amp; Recent Image Downloads</h2>
+            <p class="muted">Real-time progress of WIM and Linux boot images streaming to PXE clients</p>
+          </div>
+          <span class="poll-indicator">Auto-refreshing every 1.5s</span>
+        </div>
+        <div id="transfers-container">
+          <p class="empty-state">No active image downloads right now. Boot a PXE client or click "Simulate PXE Client Boot" above.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2>Recent Device Activity</h2>
+          <button class="btn btn-sm" onclick="switchTab('devices')">View All Devices →</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>MAC Address</th>
+                <th>IP Address</th>
+                <th>Manufacturer &amp; Model</th>
+                <th>Serial</th>
+                <th>Image</th>
+                <th>Current Status</th>
+                <th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody id="dashboard-devices-tbody">
+              <tr><td colspan="7" class="empty-cell">No devices discovered yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: IMAGE MANAGEMENT -->
+    <section id="tab-images" class="tab-panel">
+      <div class="two-col">
+        <!-- WINDOWS WIM MANAGEMENT -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Windows WinPE &amp; WIM Images</h2>
+              <p class="muted">Directory: <code>http_files/images/winpe/</code></p>
+            </div>
+            <span id="winpe-ready-badge" class="badge">Checking...</span>
+          </div>
+
+          <form class="upload-box" onsubmit="uploadImage(event, 'windows')">
+            <label><strong>Add / Upload Windows Image (<code>.wim</code>) or Boot File:</strong></label>
+            <div class="upload-row">
+              <input type="file" id="win-file-input" accept=".wim,.sdi,.ini,.bat,*" required>
+              <button type="submit" class="btn btn-primary" id="win-upload-btn">Upload to WinPE</button>
+            </div>
+            <div id="win-upload-progress" class="upload-status hidden">Uploading...</div>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Filename</th>
+                  <th>Size</th>
+                  <th>Modified</th>
+                  <th>Role</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="win-files-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- LINUX IMAGE MANAGEMENT -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Linux Installer Images</h2>
+              <p class="muted">Directory: <code>http_files/images/linux/</code></p>
+            </div>
+            <span id="linux-ready-badge" class="badge">Placeholder Mode</span>
+          </div>
+
+          <form class="upload-box" onsubmit="uploadImage(event, 'linux')">
+            <label><strong>Add / Upload Linux Kernel (<code>vmlinuz</code>), <code>initrd.img</code>, or Image:</strong></label>
+            <div class="upload-row">
+              <input type="file" id="linux-file-input" required>
+              <button type="submit" class="btn btn-primary" id="linux-upload-btn">Upload to Linux</button>
+            </div>
+            <div id="linux-upload-progress" class="upload-status hidden">Uploading...</div>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Filename</th>
+                  <th>Size</th>
+                  <th>Modified</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="linux-files-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 3: HARDWARE INVENTORY & DEVICES -->
+    <section id="tab-devices" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2>PXE Client Hardware Inventory</h2>
+            <p class="muted">Automatically captured via iPXE SMBIOS inspection (MAC, Manufacturer, Model, Serial, UUID, CPU Arch)</p>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>MAC Address</th>
+                <th>IP Address</th>
+                <th>Manufacturer</th>
+                <th>Model / Product</th>
+                <th>Serial Number</th>
+                <th>Arch</th>
+                <th>Boots</th>
+                <th>Current Status &amp; Progress</th>
+                <th>Last Seen</th>
+              </tr>
+            </thead>
+            <tbody id="devices-tbody">
+              <tr><td colspan="9" class="empty-cell">No PXE devices have checked in yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 4: LOGS -->
+    <section id="tab-logs" class="tab-panel">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2>Server, PXE, TFTP &amp; Imaging Event Logs</h2>
+            <p class="muted">Stored in SQLite (<code>imaging.db</code>)</p>
+          </div>
+          <div class="filter-group">
+            <label for="log-category">Filter:</label>
+            <select id="log-category" onchange="refreshOverview()">
+              <option value="ALL">All Categories</option>
+              <option value="PXE">PXE &amp; Hardware Discovery</option>
+              <option value="IMAGING">Imaging &amp; Transfers</option>
+              <option value="TFTP">TFTP Server</option>
+              <option value="HTTP">HTTP Requests</option>
+              <option value="IMAGE">Image Management</option>
+              <option value="SETUP">Setup &amp; Config</option>
+            </select>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Level</th>
+                <th>Category</th>
+                <th>Client IP</th>
+                <th>Device MAC</th>
+                <th>Event Message</th>
+              </tr>
+            </thead>
+            <tbody id="logs-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: SETUP & ALMALINUX STARTUP -->
+    <section id="tab-setup" class="tab-panel">
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Server Network &amp; Boot Setup</h2>
+              <p class="muted">Updates <code>config.json</code> and regenerates <code>tftp_files/boot.ipxe</code> automatically</p>
+            </div>
+          </div>
+          <form id="settings-form" onsubmit="saveSettings(event)" class="settings-form">
+            <div class="form-group">
+              <label>Detected Network Interfaces (Click to fill Server IP):</label>
+              <div id="interfaces-list" class="iface-pills"></div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfg-server-ip">Server IPv4 Address</label>
+                <input type="text" id="cfg-server-ip" required>
+              </div>
+              <div class="form-group">
+                <label for="cfg-default-wim">Default Windows WIM Filename</label>
+                <input type="text" id="cfg-default-wim" required>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfg-tftp-port">TFTP Port (UDP)</label>
+                <input type="number" id="cfg-tftp-port" required>
+              </div>
+              <div class="form-group">
+                <label for="cfg-http-port">HTTP Boot &amp; API Port (TCP)</label>
+                <input type="number" id="cfg-http-port" required>
+              </div>
+              <div class="form-group">
+                <label for="cfg-ruby-port">Ruby Web UI Port (TCP)</label>
+                <input type="number" id="cfg-ruby-port" required>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group">
+                <label for="cfg-timeout">iPXE Boot Menu Timeout (ms)</label>
+                <input type="number" id="cfg-timeout" step="1000" min="1000" required>
+              </div>
+              <div class="form-group">
+                <label for="cfg-linux-args">Linux Kernel Boot Arguments</label>
+                <input type="text" id="cfg-linux-args">
+              </div>
+            </div>
+
+            <div class="form-group checkbox-group">
+              <input type="checkbox" id="cfg-autolaunch">
+              <label for="cfg-autolaunch">Inject <code>winpeshl.ini</code> &amp; <code>install.bat</code> into WinPE automatically (reports status webhook back to server)</label>
+            </div>
+
+            <button type="submit" class="btn btn-primary">Save Configuration &amp; Sync iPXE Scripts</button>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>AlmaLinux 10 Startup &amp; Firewall Setup</h2>
+              <p class="muted">Run at startup via <code>systemd</code> + open ports in <code>firewalld</code></p>
+            </div>
+          </div>
+          <p class="help-text">
+            Every time configuration is saved, the Go server writes an executable setup script at
+            <code>ipxe-server/setup-almalinux.sh</code>. Run it once as root on AlmaLinux 10 to register both the Go server and Ruby Web UI to start automatically at boot:
+          </p>
+          <pre class="code-block">cd ipxe-server
+sudo ./setup-almalinux.sh
+sudo systemctl start lets-go-imaging lets-go-imaging-web</pre>
+
+          <h3>Generated <code>lets-go-imaging.service</code> (Go Server)</h3>
+          <pre class="code-block" id="systemd-go-preview">Loading...</pre>
+
+          <h3>Generated <code>lets-go-imaging-web.service</code> (Ruby Web UI)</h3>
+          <pre class="code-block" id="systemd-ruby-preview">Loading...</pre>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

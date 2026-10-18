@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -12,92 +14,124 @@ import (
 	"github.com/pin/tftp"     // TFTP server
 )
 
-// TFTP Server
-// tftpReadHandler is called when a client requests a file
+// tftpReadHandler is called when a PXE client requests a file over TFTP.
 func tftpReadHandler(filename string, rf io.ReaderFrom) error {
+	cfg := GetConfig()
 	// Securely join the path and prevent directory traversal
-	// e.g., prevents a request for "../../../../etc/passwd"
-	filePath := filepath.Join("tftp_files", filepath.Clean("/"+filename))
+	filePath := filepath.Join(cfg.TFTPDir, filepath.Clean("/"+filename))
 
-	// Open the requested file
+	clientIP := ""
+	if raddr, ok := rf.(tftp.OutgoingTransfer); ok {
+		rnet := raddr.RemoteAddr()
+		clientIP = rnet.IP.String()
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
-		log.Printf("[TFTP] ERROR opening file %s: %v", filePath, err)
+		RecordLog("ERROR", "TFTP", "", clientIP, fmt.Sprintf("Failed to open TFTP file %s: %v", filePath, err))
 		return err
 	}
 	defer file.Close()
 
-	// Get file stats to log the size
 	stat, err := file.Stat()
 	if err != nil {
-		log.Printf("[TFTP] ERROR getting stats for %s: %v", filePath, err)
+		RecordLog("ERROR", "TFTP", "", clientIP, fmt.Sprintf("Failed to stat TFTP file %s: %v", filePath, err))
 		return err
 	}
 
-	log.Printf("[TFTP] Serving file %s (%d bytes)", filePath, stat.Size())
+	RecordLog("INFO", "TFTP", "", clientIP, fmt.Sprintf("Serving %s (%d bytes)", filepath.Base(filePath), stat.Size()))
 
-	// Send the file's content to the client
 	n, err := rf.ReadFrom(file)
 	if err != nil {
-		log.Printf("[TFTP] ERROR sending file %s: %v", filePath, err)
+		RecordLog("ERROR", "TFTP", "", clientIP, fmt.Sprintf("Error sending %s: %v", filepath.Base(filePath), err))
 		return err
 	}
 
-	log.Printf("[TFTP] Sent %d bytes of %s", n, filePath)
+	RecordLog("INFO", "TFTP", "", clientIP, fmt.Sprintf("Completed sending %s (%d bytes)", filepath.Base(filePath), n))
 	return nil
-
 }
 
-// Start TFTP server in a goroutine
-func startTFTPServer() {
-	log.Println("Starting TFTP server on :69...")
+// startTFTPServer launches the TFTP server on the configured UDP port.
+func startTFTPServer(port int) {
+	addr := fmt.Sprintf(":%d", port)
+	RecordLog("INFO", "SYSTEM", "", "", fmt.Sprintf("Starting TFTP server on UDP %s", addr))
 	s := tftp.NewServer(tftpReadHandler, nil)
-
-	// Set a timeout
 	s.SetTimeout(5 * time.Second)
 
-	// Start the server
-	err := s.ListenAndServe(":69") // This will listen on all interfaces, port 69
-	if err != nil {
-		log.Fatalf("TFTP server failed to start: %v", err)
+	if err := s.ListenAndServe(addr); err != nil {
+		RecordLog("ERROR", "SYSTEM", "", "", fmt.Sprintf("TFTP server failed on %s: %v", addr, err))
 	}
 }
 
-// HTTP Server
+// startHTTPServer launches the HTTP server serving dynamic iPXE menus, REST APIs, and tracked OS images.
+func startHTTPServer(port int) {
+	cfg := GetConfig()
+	addr := fmt.Sprintf(":%d", port)
+	RecordLog("INFO", "SYSTEM", "", "", fmt.Sprintf("Starting HTTP Boot & API server on TCP %s (Server IP: %s)", addr, cfg.ServerIP))
 
-// loggingMiddleware logs the incoming HTTP request
-func logHTTPRequest(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[HTTP] Request from %s for %s", r.RemoteAddr, r.URL.Path)
-		next.ServeHTTP(w, r)
-	})
+	mux := http.NewServeMux()
+
+	// Dynamic HTTP iPXE Boot Endpoints (collects SMBIOS hardware inventory)
+	mux.HandleFunc("/boot/menu.ipxe", handleBootMenu)
+	mux.HandleFunc("/boot/winpe.ipxe", handleBootWinPE)
+	mux.HandleFunc("/boot/linux.ipxe", handleBootLinux)
+	mux.HandleFunc("/boot/winpe/install.bat", handleWinPEInstallBat)
+
+	// Management REST API Endpoints (consumed by Ruby Sinatra Web UI)
+	RegisterAPIRoutes(mux)
+
+	// Static & Image File Server with Real-Time Download Progress Tracking
+	fileHandler := serveHTTPFilesWithProgress(gzipped.FileServer(http.Dir(cfg.HTTPDir)))
+	mux.Handle("/", fileHandler)
+
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatalf("HTTP server failed to start on %s: %v", addr, err)
+	}
 }
 
-// Start the HTTP Server
-func startHTTPServer() {
-	log.Println("Starting HTTP server on :80...")
-
-	// Use the gzipped file server to serve files from the 'http_files' directory
-	// This will handle iPXE scripts, kernels, WIMs, etc.
-	handler := logHTTPRequest(gzipped.FileServer(http.Dir("http_files")))
-
-	// Start the Server
-	err := http.ListenAndServe(":80", handler) // Listen on all interfaces, port 80
+func isInteractiveTerminal() bool {
+	fi, err := os.Stdin.Stat()
 	if err != nil {
-		log.Fatalf("HTTP server failed to start: %v", err)
+		return false
 	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 func main() {
-	log.Println("--- Starting iPXE Boot Server ---")
+	forceSetup := flag.Bool("setup", false, "Run the interactive first-time setup wizard")
+	nonInteractive := flag.Bool("non-interactive", false, "Skip interactive CLI prompts and use default/existing config")
+	flag.Parse()
 
-	// Start the TFTP server in its own goroutine
-	go startTFTPServer()
+	log.Println("--- Starting Lets Go Imaging (Go iPXE & API Server) ---")
 
-	// Start the HTTP server in its own goroutine
-	go startHTTPServer()
+	cfg, exists, err := LoadConfig()
+	if err != nil {
+		log.Printf("[WARN] Error reading config.json, loading defaults: %v", err)
+	}
 
-	// Keep the function alive forever
-	// Add web ui logic here later
+	if *forceSetup || (!exists && !*nonInteractive && isInteractiveTerminal()) {
+		cfg, err = RunSetupWizard(cfg)
+		if err != nil {
+			log.Fatalf("Setup wizard failed: %v", err)
+		}
+	} else if !exists {
+		cfg.SetupCompleted = true
+		_ = EnsureDirectories(cfg)
+		_ = SaveConfig(cfg)
+		_, _ = WriteAlmaLinuxSetupScript(cfg)
+		log.Printf("[INIT] Created default config.json (Server IP: %s, HTTP: :%d, TFTP: :%d)", cfg.ServerIP, cfg.HTTPPort, cfg.TFTPPort)
+	} else {
+		_ = EnsureDirectories(cfg)
+		_ = syncTFTPBootScript(cfg)
+	}
+
+	if err := InitDB(cfg.DBPath); err != nil {
+		log.Fatalf("Failed to initialize SQLite database (%s): %v", cfg.DBPath, err)
+	}
+	RecordLog("INFO", "SYSTEM", "", "", fmt.Sprintf("Lets Go Imaging initialized (Server IP: %s, Default WIM: %s)", cfg.ServerIP, cfg.DefaultWim))
+
+	go startTFTPServer(cfg.TFTPPort)
+	go startHTTPServer(cfg.HTTPPort)
+
 	select {}
 }

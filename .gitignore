@@ -1,3 +1,13 @@
 *.wim
 *.img
+*.iso
 vmlinuz
+*.db
+*.db-wal
+*.db-shm
+*.exe
+ipxe-server/ipxe-server
+ipxe-server/config.json
+ipxe-server/setup-almalinux.sh
+web-ui/.bundle/
+web-ui/vendor/
