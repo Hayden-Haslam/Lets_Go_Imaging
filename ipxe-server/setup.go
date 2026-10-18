@@ -11,17 +11,31 @@ import (
 	"strings"
 )
 
-// EnsureDirectories creates the required directory structure for TFTP, WinPE, and Linux images.
+var (
+	initialAdminUsername = "admin"
+	initialAdminPassword = "admin123"
+)
+
+// EnsureDirectories creates the required directory structure for TFTP, WinPE boot, OS WIMs, and Linux images.
 func EnsureDirectories(cfg ServerConfig) error {
 	dirs := []string{
 		cfg.TFTPDir,
 		filepath.Join(cfg.HTTPDir, "images", "winpe"),
+		filepath.Join(cfg.HTTPDir, "images", "os"),
 		filepath.Join(cfg.HTTPDir, "images", "linux"),
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
+	}
+
+	// Ensure a README exists in the OS WIMs directory
+	osReadme := filepath.Join(cfg.HTTPDir, "images", "os", "README.txt")
+	if _, err := os.Stat(osReadme); os.IsNotExist(err) {
+		content := "Drop your configured Windows deployment WIM images (e.g., Dell-Win11.wim, Lenovo-Win11.wim) in this folder,\n" +
+			"or upload and manage them from the Web Management UI -> Image Management -> OS Deployment WIMs.\n"
+		_ = os.WriteFile(osReadme, []byte(content), 0644)
 	}
 
 	// Ensure a README placeholder exists in the Linux images directory
@@ -43,13 +57,19 @@ func RunSetupWizard(existing ServerConfig) (ServerConfig, error) {
 	fmt.Println("=============================================================")
 	fmt.Println("         LETS GO IMAGING - FIRST-TIME SETUP WIZARD           ")
 	fmt.Println("=============================================================")
-	fmt.Println("This wizard will configure your iPXE Server IP, ports, image")
-	fmt.Println("directories, and startup/firewall settings (AlmaLinux/Linux).")
+	fmt.Println("This wizard will configure your iPXE Server IP, ports, initial")
+	fmt.Println("Web UI admin credentials, and AlmaLinux 10 startup services.")
 	fmt.Println()
+
+	// Step 0: Node Name (useful for Office vs Warehouse multi-node sync)
+	fmt.Printf("0) Node / Site Name (e.g. Base-Office, Warehouse-1) [%s]: ", cfg.NodeName)
+	if input, _ := reader.ReadString('\n'); strings.TrimSpace(input) != "" {
+		cfg.NodeName = strings.TrimSpace(input)
+	}
 
 	// Step 1: Network Interface & IP Address Selection
 	ifaces := ListNetworkInterfaces()
-	fmt.Println("1) Select the Server IPv4 Address (used by iPXE clients):")
+	fmt.Println("\n1) Select the Server IPv4 Address (used by iPXE clients):")
 	if len(ifaces) > 0 {
 		for idx, iface := range ifaces {
 			fmt.Printf("   [%d] %s (%s - MAC: %s)\n", idx+1, iface.IP, iface.Name, iface.MAC)
@@ -114,9 +134,20 @@ func RunSetupWizard(existing ServerConfig) (ServerConfig, error) {
 		}
 	}
 
-	fmt.Printf("6) Default Windows WIM filename in http_files/images/winpe/ [%s]: ", cfg.DefaultWim)
+	fmt.Printf("6) Default WinPE Boot WIM filename in http_files/images/winpe/ [%s]: ", cfg.DefaultWim)
 	if input, _ := reader.ReadString('\n'); strings.TrimSpace(input) != "" {
 		cfg.DefaultWim = strings.TrimSpace(input)
+	}
+
+	// Step 4: Initial Web UI Admin Account
+	fmt.Println("\n--- Web UI Initial Admin Credentials (Prompts for reset on 1st login) ---")
+	fmt.Printf("7) Initial Admin Username [%s]: ", initialAdminUsername)
+	if input, _ := reader.ReadString('\n'); strings.TrimSpace(input) != "" {
+		initialAdminUsername = strings.TrimSpace(input)
+	}
+	fmt.Printf("8) Initial Admin Password [%s]: ", initialAdminPassword)
+	if input, _ := reader.ReadString('\n'); strings.TrimSpace(input) != "" {
+		initialAdminPassword = strings.TrimSpace(input)
 	}
 
 	cfg.SetupCompleted = true
@@ -128,18 +159,18 @@ func RunSetupWizard(existing ServerConfig) (ServerConfig, error) {
 		return cfg, err
 	}
 
-	// Generate AlmaLinux 10 helper script regardless of current OS so it is always ready
 	scriptPath, _ := WriteAlmaLinuxSetupScript(cfg)
 	fmt.Printf("\n[OK] Saved configuration to %s and updated %s/boot.ipxe\n", configFilePath, cfg.TFTPDir)
+	fmt.Printf("[OK] Node Sync Key (for linking warehouse nodes): %s\n", cfg.SyncSecret)
 	if scriptPath != "" {
 		fmt.Printf("[OK] Generated AlmaLinux 10 startup & firewall script: %s\n", scriptPath)
 	}
 
-	// Step 4: Optional Linux / AlmaLinux 10 startup service & firewall installation
+	// Step 5: Optional Linux / AlmaLinux 10 startup service & firewall installation
 	if runtime.GOOS == "linux" {
-		fmt.Print("\n7) Would you like to install & enable the systemd startup services and firewalld rules now? [y/N]: ")
+		fmt.Print("\n9) Would you like to install & enable the systemd startup services and firewalld rules now? [y/N]: ")
 		ans, _ := reader.ReadString('\n')
-		ans = strings.TrimSpace( strings.ToLower(ans))
+		ans = strings.TrimSpace(strings.ToLower(ans))
 		if ans == "y" || ans == "yes" {
 			if err := ApplyLinuxStartupAndFirewall(cfg); err != nil {
 				fmt.Printf("   [WARN] Could not automatically apply systemd/firewalld (try running as root or run ./%s): %v\n", scriptPath, err)
@@ -152,6 +183,7 @@ func RunSetupWizard(existing ServerConfig) (ServerConfig, error) {
 	fmt.Println("=============================================================")
 	fmt.Printf(" Setup Complete! Go Boot/API Server: http://%s:%d\n", cfg.ServerIP, cfg.HTTPPort)
 	fmt.Printf(" Ruby Web Management UI:             http://%s:%d\n", cfg.ServerIP, cfg.RubyWebPort)
+	fmt.Printf(" Initial Web Login:                  %s / %s\n", initialAdminUsername, initialAdminPassword)
 	fmt.Println("=============================================================")
 	fmt.Println()
 
@@ -162,7 +194,7 @@ func RunSetupWizard(existing ServerConfig) (ServerConfig, error) {
 func GenerateSystemdUnits(cfg ServerConfig) (goService string, rubyService string) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		cwd = "/opt/lets-go-imaging/ipxe-server"
+		cwd = "/opt/Lets_Go_Imaging/ipxe-server"
 	}
 	webDir := filepath.Clean(filepath.Join(cwd, "..", "web-ui"))
 	binPath := filepath.Join(cwd, "ipxe-server")
@@ -175,7 +207,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%s
-ExecStart=%s
+ExecStart=%s --non-interactive
 Restart=on-failure
 RestartSec=3
 User=root
@@ -208,7 +240,7 @@ WantedBy=multi-user.target
 }
 
 // WriteAlmaLinuxSetupScript generates an executable shell script for AlmaLinux 10 to install
-// systemd services, configure firewalld, and set SELinux booleans if needed.
+// systemd services and configure firewalld.
 func WriteAlmaLinuxSetupScript(cfg ServerConfig) (string, error) {
 	goUnit, rubyUnit := GenerateSystemdUnits(cfg)
 

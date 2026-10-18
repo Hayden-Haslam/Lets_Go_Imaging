@@ -132,6 +132,7 @@ func main() {
 
 	go startTFTPServer(cfg.TFTPPort)
 	go startHTTPServer(cfg.HTTPPort)
+	go StartSyncScheduler()
 
 	select {}
 }

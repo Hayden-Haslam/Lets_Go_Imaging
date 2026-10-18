@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,6 +16,7 @@ const configFilePath = "config.json"
 // ServerConfig stores persistent server settings configured via the CLI wizard or Web UI.
 type ServerConfig struct {
 	ServerIP                 string `json:"server_ip"`
+	NodeName                 string `json:"node_name"`
 	TFTPPort                 int    `json:"tftp_port"`
 	HTTPPort                 int    `json:"http_port"`
 	RubyWebPort              int    `json:"ruby_web_port"`
@@ -21,6 +24,10 @@ type ServerConfig struct {
 	LinuxKernelArgs          string `json:"linux_kernel_args"`
 	MenuTimeoutMs            int    `json:"menu_timeout_ms"`
 	AutoLaunchWinPEInstaller bool   `json:"auto_launch_winpe_installer"`
+	SyncSecret               string `json:"sync_secret"`
+	SyncMaxMBps              int    `json:"sync_max_mbps"`           // 0 = unlimited, >0 limits WAN sync speed in MB/s
+	SyncSchedule             string `json:"sync_schedule"`          // ""/"disabled", "realtime", or "HH:MM" (e.g. "02:00")
+	SyncRulesWithImages      bool   `json:"sync_rules_with_images"` // Replicate BIOS Auto-WIM rules to warehouse nodes
 	TFTPDir                  string `json:"tftp_dir"`
 	HTTPDir                  string `json:"http_dir"`
 	DBPath                   string `json:"db_path"`
@@ -32,14 +39,27 @@ var (
 	appConfig ServerConfig
 )
 
+func generateRandomHex(bytesLen int) string {
+	b := make([]byte, bytesLen)
+	if _, err := rand.Read(b); err != nil {
+		return "lgi-default-sync-key-change-me"
+	}
+	return hex.EncodeToString(b)
+}
+
 // DefaultConfig returns sensible defaults for Lets_Go_Imaging.
 func DefaultConfig() ServerConfig {
 	detectedIP := detectPrimaryIPv4()
 	if detectedIP == "" {
 		detectedIP = "192.168.1.10"
 	}
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "Primary-Imaging-Node"
+	}
 	return ServerConfig{
 		ServerIP:                 detectedIP,
+		NodeName:                 hostname,
 		TFTPPort:                 69,
 		HTTPPort:                 80,
 		RubyWebPort:              4567,
@@ -47,6 +67,10 @@ func DefaultConfig() ServerConfig {
 		LinuxKernelArgs:          "initrd=initrd.img root=/dev/ram0 ip=dhcp",
 		MenuTimeoutMs:            10000,
 		AutoLaunchWinPEInstaller: false,
+		SyncSecret:               generateRandomHex(16),
+		SyncMaxMBps:              0,
+		SyncSchedule:             "02:00",
+		SyncRulesWithImages:      true,
 		TFTPDir:                  "tftp_files",
 		HTTPDir:                  "http_files",
 		DBPath:                   "imaging.db",
@@ -79,6 +103,9 @@ func LoadConfig() (ServerConfig, bool, error) {
 		return cfg, true, err
 	}
 
+	if cfg.NodeName == "" {
+		cfg.NodeName = "Primary-Imaging-Node"
+	}
 	if cfg.TFTPDir == "" {
 		cfg.TFTPDir = "tftp_files"
 	}
@@ -93,6 +120,9 @@ func LoadConfig() (ServerConfig, bool, error) {
 	}
 	if cfg.MenuTimeoutMs <= 0 {
 		cfg.MenuTimeoutMs = 10000
+	}
+	if cfg.SyncSecret == "" {
+		cfg.SyncSecret = generateRandomHex(16)
 	}
 
 	configMu.Lock()
@@ -120,7 +150,7 @@ func SaveConfig(cfg ServerConfig) error {
 }
 
 // syncTFTPBootScript writes tftp_files/boot.ipxe so TFTP clients immediately chainload
-// the dynamic HTTP menu while passing SMBIOS hardware identifiers (MAC, Manufacturer, Model, Serial, UUID, Arch).
+// the dynamic HTTP menu while passing SMBIOS hardware identifiers (MAC, IP, Manufacturer, Model, Serial, UUID, Arch, Asset Tag, BIOS Version, NIC Chip).
 func syncTFTPBootScript(cfg ServerConfig) error {
 	if err := os.MkdirAll(cfg.TFTPDir, 0755); err != nil {
 		return err
@@ -143,18 +173,18 @@ echo  MAC: ${net0/mac} | IP: ${ip}
 echo  Model: ${manufacturer} ${product}
 echo ==========================================================
 
-chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring} || goto fallback
+chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}&asset=${asset:uristring}&bios=${smbios/0.2.0:uristring}&chip=${chip:uristring} || goto fallback
 `, cfg.ServerIP, cfg.ServerIP, portPart)
 
 	script += fmt.Sprintf(`
 :fallback
 echo Dynamic HTTP menu unreachable on ${boot-url}, falling back to local static menu...
 menu Lets Go Imaging (Fallback Mode)
+item exit  Exit to Local Disk Boot (Default)
 item winpe Boot Windows Installer (WinPE)
 item linux Boot Linux Installer
 item shell Drop to iPXE Shell
-item exit  Exit to Local Boot
-choose --default winpe --timeout %d target && goto ${target}
+choose --default exit --timeout %d target && goto ${target}
 
 :winpe
 chain tftp://${next-server}/winpe.ipxe || goto fallback

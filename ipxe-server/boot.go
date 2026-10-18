@@ -10,7 +10,8 @@ import (
 	"unicode"
 )
 
-// handleBootMenu serves /boot/menu.ipxe dynamically over HTTP and records hardware info.
+// handleBootMenu serves /boot/menu.ipxe dynamically over HTTP, records full SMBIOS hardware info,
+// executes one-time queued boot tasks, and defaults timeout to 'exit' (Local Disk) to prevent boot loops.
 func handleBootMenu(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	q := r.URL.Query()
@@ -22,13 +23,49 @@ func handleBootMenu(w http.ResponseWriter, r *http.Request) {
 	serial := cleanField(q.Get("serial"))
 	uuid := parseIPXEUUID(q.Get("uuid"))
 	arch := cleanField(q.Get("arch"))
+	asset := cleanField(q.Get("asset"))
+	bios := cleanField(q.Get("bios"))
+	chip := cleanField(q.Get("chip"))
 
-	UpsertDevice(mac, ip, mfg, model, serial, uuid, arch, "At iPXE Boot Menu", "")
-	RecordLog("INFO", "PXE", mac, ip, fmt.Sprintf("Device booted to iPXE menu: %s %s (Serial: %s, Arch: %s)", mfg, model, serial, arch))
+	UpsertDevice(mac, ip, mfg, model, serial, uuid, arch, asset, bios, chip, "At iPXE Boot Menu", "")
+
+	targetOSWim, matchSource := ResolveTargetOSWim(mac, mfg, model)
+	matchNote := "None (Manual Prompt in WinPE)"
+	if targetOSWim != "" {
+		matchNote = fmt.Sprintf("%s [%s]", targetOSWim, matchSource)
+	}
+
+	RecordLog("INFO", "PXE", mac, ip, fmt.Sprintf("Device booted to iPXE: %s %s (Serial: %s, BIOS: %s, NIC: %s, Matched WIM: %s)", mfg, model, serial, bios, chip, matchNote))
 
 	baseURL := serverBaseURL(cfg, r)
-	wimFiles := listFilesWithExt(filepath.Join(cfg.HTTPDir, "images", "winpe"), ".wim")
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
+	// Check if a one-time Next Boot Action was queued for this device in the Web UI
+	queuedAction, assignedWim := ConsumeDeviceNextBootAction(mac)
+	if strings.HasPrefix(queuedAction, "os:") {
+		osWim := strings.TrimPrefix(queuedAction, "os:")
+		_ = SetDeviceQueue(mac, "menu", osWim)
+		RecordLog("INFO", "IMAGING", mac, ip, fmt.Sprintf("Executing one-time queued OS deployment (%s) and resetting next boot to local disk", osWim))
+		autoScript := fmt.Sprintf("#!ipxe\necho [QUEUED TASK] Launching WinPE for OS Image: %s...\nchain %s/boot/winpe.ipxe?mac=%s&wim=%s&os_wim=%s\n", osWim, baseURL, mac, cfg.DefaultWim, osWim)
+		_, _ = w.Write([]byte(autoScript))
+		return
+	} else if queuedAction == "winpe" {
+		RecordLog("INFO", "IMAGING", mac, ip, "Executing one-time queued WinPE boot and resetting next boot to local disk")
+		autoScript := fmt.Sprintf("#!ipxe\necho [QUEUED TASK] Launching Windows Preinstallation Environment...\nchain %s/boot/winpe.ipxe?mac=%s&wim=%s&os_wim=%s\n", baseURL, mac, cfg.DefaultWim, assignedWim)
+		_, _ = w.Write([]byte(autoScript))
+		return
+	} else if queuedAction == "linux" {
+		RecordLog("INFO", "IMAGING", mac, ip, "Executing one-time queued Linux boot and resetting next boot to local disk")
+		autoScript := fmt.Sprintf("#!ipxe\necho [QUEUED TASK] Launching Linux Installer...\nchain %s/boot/linux.ipxe?mac=%s\n", baseURL, mac)
+		_, _ = w.Write([]byte(autoScript))
+		return
+	} else if queuedAction == "exit" {
+		RecordLog("INFO", "PXE", mac, ip, "Device configured to skip PXE menu and boot to local disk")
+		_, _ = w.Write([]byte("#!ipxe\necho Exiting to local disk boot...\nexit\n"))
+		return
+	}
+
+	wimFiles := listFilesWithExt(filepath.Join(cfg.HTTPDir, "images", "winpe"), ".wim")
 	var extraWimMenuItems strings.Builder
 	var extraWimTargets strings.Builder
 	for idx, wim := range wimFiles {
@@ -45,22 +82,26 @@ func handleBootMenu(w http.ResponseWriter, r *http.Request) {
 	if len(hostLine) > 74 {
 		hostLine = hostLine[:74]
 	}
+	ruleLine := fmt.Sprintf("Auto-Matched OS WIM: %s", matchNote)
+	if len(ruleLine) > 74 {
+		ruleLine = ruleLine[:74]
+	}
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	script := fmt.Sprintf(`#!ipxe
 
 :MENU
 menu Lets Go Imaging - Network Boot Menu (%s)
 item --gap -- %s
+item --gap -- %s
 item --gap -- ---------------- Operating System Deployment ----------------
+item exit       Continue Local Disk Boot (Default on Timeout)
 item winpe      Boot Windows Environment (WinPE - %s)
 %sitem linux      Boot Linux Installer / Live Environment
 item --gap -- ---------------- Diagnostics & Utilities --------------------
 item hwinfo     View Detected Device Hardware Info
 item shell      Drop to iPXE Command Shell
-item exit       Exit & Continue Local Disk Boot
 
-choose --default winpe --timeout %d target && goto ${target} || goto MENU
+choose --default exit --timeout %d target && goto ${target} || goto exit
 
 :winpe
 echo Booting Windows Preinstallation Environment (%s)...
@@ -79,8 +120,12 @@ echo  IPv4 Address : %s
 echo  Manufacturer : %s
 echo  Model/Product: %s
 echo  Serial Number: %s
+echo  Asset Tag    : %s
+echo  BIOS Version : %s
+echo  NIC Chipset  : %s
 echo  System UUID  : %s
 echo  Architecture : %s
+echo  Matched WIM  : %s
 echo ==========================================================
 prompt Press any key to return to the boot menu...
 goto MENU
@@ -90,8 +135,9 @@ shell || goto MENU
 goto MENU
 
 :exit
+echo Continuing to local disk boot...
 exit
-`, ip, hostLine, cfg.DefaultWim, extraWimMenuItems.String(), cfg.MenuTimeoutMs, cfg.DefaultWim, baseURL, mac, cfg.DefaultWim, extraWimTargets.String(), baseURL, mac, mac, ip, mfg, model, serial, uuid, arch)
+`, ip, hostLine, ruleLine, cfg.DefaultWim, extraWimMenuItems.String(), cfg.MenuTimeoutMs, cfg.DefaultWim, baseURL, mac, cfg.DefaultWim, extraWimTargets.String(), baseURL, mac, mac, ip, mfg, model, serial, asset, bios, chip, uuid, arch, matchNote)
 
 	_, _ = w.Write([]byte(script))
 }
@@ -109,7 +155,7 @@ func handleBootWinPE(w http.ResponseWriter, r *http.Request) {
 	baseURL := serverBaseURL(cfg, r)
 	winpeDir := filepath.Join(cfg.HTTPDir, "images", "winpe")
 	wimPath := filepath.Join(winpeDir, wimName)
-	returnMenuURL := fmt.Sprintf("%s/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}", baseURL)
+	returnMenuURL := fmt.Sprintf("%s/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}&asset=${asset:uristring}&bios=${smbios/0.2.0:uristring}&chip=${chip:uristring}", baseURL)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
@@ -130,10 +176,15 @@ chain %s
 		return
 	}
 
-	RecordLog("INFO", "IMAGING", mac, ip, fmt.Sprintf("Starting WinPE boot with image '%s'", wimName))
-	UpdateDeviceStatus(mac, ip, fmt.Sprintf("Loading WinPE (%s)", wimName), wimName, 5)
+	targetOSWim, matchSource := ResolveTargetOSWim(mac, "", "")
+	statusLabel := fmt.Sprintf("Loading WinPE (%s)", wimName)
+	if targetOSWim != "" {
+		statusLabel = fmt.Sprintf("Loading WinPE -> Target OS: %s (%s)", targetOSWim, matchSource)
+	}
+	RecordLog("INFO", "IMAGING", mac, ip, statusLabel)
+	UpdateDeviceStatus(mac, ip, statusLabel, wimName, 5)
 
-	autoLines := "# Auto-launch scripts disabled in settings (standard WinPE boot)\n"
+	autoLines := fmt.Sprintf("# Always inject lgi-env.bat so WinPE scripts can inspect auto-matched OS WIM variables\ninitrd %s/boot/winpe/install.bat?mac=%s install.bat\n", baseURL, mac)
 	if cfg.AutoLaunchWinPEInstaller {
 		autoLines = fmt.Sprintf("initrd %s/images/winpe/winpeshl.ini winpeshl.ini\ninitrd %s/boot/winpe/install.bat?mac=%s install.bat\n", baseURL, baseURL, mac)
 	}
@@ -169,7 +220,7 @@ func handleBootLinux(w http.ResponseWriter, r *http.Request) {
 	mac := parseIPXEMAC(r.URL.Query().Get("mac"))
 	ip := cleanClientIP(r.RemoteAddr)
 	baseURL := serverBaseURL(cfg, r)
-	returnMenuURL := fmt.Sprintf("%s/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}", baseURL)
+	returnMenuURL := fmt.Sprintf("%s/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}&asset=${asset:uristring}&bios=${smbios/0.2.0:uristring}&chip=${chip:uristring}", baseURL)
 
 	linuxDir := filepath.Join(cfg.HTTPDir, "images", "linux")
 	kernelPath := filepath.Join(linuxDir, "vmlinuz")
@@ -223,26 +274,49 @@ chain %s
 	_, _ = w.Write([]byte(script))
 }
 
-// handleWinPEInstallBat generates a dynamic install.bat script injected into WinPE that reports
-// imaging status back to the Go server over HTTP.
+// handleWinPEInstallBat generates a dynamic install.bat script injected into WinPE (X:\Windows\System32\install.bat).
+// It exports TARGET_OS_WIM and TARGET_OS_WIM_URL based on BIOS Manufacturer/Model rules or device assignment!
 func handleWinPEInstallBat(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	mac := parseIPXEMAC(r.URL.Query().Get("mac"))
 	baseURL := serverBaseURL(cfg, r)
+	targetOSWim, matchSource := ResolveTargetOSWim(mac, "", "")
+
+	autoApply := "0"
+	targetURL := ""
+	statusMsg := "WinPE Booted - Waiting for Image Selection"
+	if targetOSWim != "" {
+		autoApply = "1"
+		targetURL = fmt.Sprintf("%s/images/os/%s", baseURL, targetOSWim)
+		statusMsg = fmt.Sprintf("WinPE Booted - Auto-Matched %s (%s)", targetOSWim, matchSource)
+	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	bat := fmt.Sprintf(`@echo off
+SET LGI_SERVER_URL=%s
+SET LGI_DEVICE_MAC=%s
+SET TARGET_OS_WIM=%s
+SET TARGET_OS_WIM_URL=%s
+SET TARGET_MATCH_RULE=%s
+SET AUTO_APPLY_WIM=%s
+
 echo Initializing Windows Preinstallation Environment (Lets Go Imaging)...
 wpeinit
-curl.exe -s -X POST "%s/api/devices/status" -H "Content-Type: application/json" -d "{\"mac\":\"%s\",\"status\":\"WinPE Booted - Ready for Custom Image Deployment\",\"progress_pct\":100}"
+curl.exe -s -X POST "%s/api/devices/status" -H "Content-Type: application/json" -d "{\"mac\":\"%s\",\"status\":\"%s\",\"image\":\"%s\",\"progress_pct\":100}"
 echo.
 echo ================================================================
 echo  Lets Go Imaging - WinPE Environment Ready
-echo  Server: %s
-echo  Device MAC: %s
+echo  Server URL        : %%LGI_SERVER_URL%%
+echo  Device MAC        : %%LGI_DEVICE_MAC%%
+echo  Auto-Matched WIM  : %%TARGET_OS_WIM%% (%%TARGET_MATCH_RULE%%)
+echo  OS WIM HTTP URL   : %%TARGET_OS_WIM_URL%%
 echo ================================================================
+if "%%AUTO_APPLY_WIM%%"=="1" (
+    echo [AUTO-IMAGE] BIOS matched rule "%%TARGET_MATCH_RULE%%".
+    echo [AUTO-IMAGE] Your custom WinPE script can pull %%TARGET_OS_WIM_URL%% automatically!
+)
 cmd.exe
-`, baseURL, mac, baseURL, mac)
+`, baseURL, mac, targetOSWim, targetURL, matchSource, autoApply, baseURL, mac, statusMsg, targetOSWim)
 	_, _ = w.Write([]byte(bat))
 }
 

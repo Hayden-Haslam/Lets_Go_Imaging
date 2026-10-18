@@ -9,16 +9,16 @@ echo  MAC: ${net0/mac} | IP: ${ip}
 echo  Model: ${manufacturer} ${product}
 echo ==========================================================
 
-chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring} || goto fallback
+chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}&asset=${asset:uristring}&bios=${smbios/0.2.0:uristring}&chip=${chip:uristring} || goto fallback
 
 :fallback
 echo Dynamic HTTP menu unreachable on ${boot-url}, falling back to local static menu...
 menu Lets Go Imaging (Fallback Mode)
+item exit  Exit to Local Disk Boot (Default)
 item winpe Boot Windows Installer (WinPE)
 item linux Boot Linux Installer
 item shell Drop to iPXE Shell
-item exit  Exit to Local Boot
-choose --default winpe --timeout 10000 target && goto ${target}
+choose --default exit --timeout 10000 target && goto ${target}
 
 :winpe
 chain tftp://${next-server}/winpe.ipxe || goto fallback

@@ -11,7 +11,7 @@
     <div class="brand">
       <div class="brand-logo">LGI</div>
       <div>
-        <h1>Lets Go Imaging</h1>
+        <h1>Lets Go Imaging <span id="node-name-badge" class="badge badge-info">Primary Node</span></h1>
         <p class="subtitle">Go iPXE Boot Server &amp; Ruby Sinatra Management Console</p>
       </div>
     </div>
@@ -19,24 +19,38 @@
       <span id="backend-badge" class="status-pill <%= @backend_online ? 'online' : 'offline' %>">
         <%= @backend_online ? 'Go Server Online' : 'Go Server Offline' %>
       </span>
-      <button class="btn btn-secondary" onclick="simulateBoot()" title="Simulate a PXE client hardware check-in and WIM download">
-        ⚡ Simulate PXE Client Boot
+      <button id="simulate-btn" class="btn btn-secondary hidden" onclick="simulateBoot()" title="Simulate a PXE client hardware check-in and WIM download">
+        ⚡ Simulate PXE Boot
       </button>
+      <div id="auth-controls">
+        <button id="login-btn" class="btn btn-primary" onclick="openLoginModal()">🔒 Sign In to Manage</button>
+        <div id="user-pill" class="user-pill hidden">
+          <span id="current-user-label">admin</span>
+          <button class="btn btn-sm btn-secondary" onclick="openPasswordModal()">Key</button>
+          <button class="btn btn-sm btn-danger" onclick="logout()">Sign Out</button>
+        </div>
+      </div>
     </div>
   </header>
 
-  <nav class="tabs">
-    <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard &amp; Live Transfers</button>
-    <button class="tab-btn" data-tab="images" onclick="switchTab('images')">Image Management (WIM &amp; Linux)</button>
-    <button class="tab-btn" data-tab="devices" onclick="switchTab('devices')">Hardware Inventory &amp; Devices</button>
+  <div id="view-only-banner" class="view-only-banner">
+    <span>👀 <strong>View-Only Wallboard Mode:</strong> Showing live imaging analytics and transfer status. Sign in to manage images, queue devices, or change settings.</span>
+    <button class="btn btn-sm btn-primary" onclick="openLoginModal()">Sign In</button>
+  </div>
+
+  <nav id="main-tabs" class="tabs hidden">
+    <button class="tab-btn active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard &amp; Analytics</button>
+    <button class="tab-btn" data-tab="images" onclick="switchTab('images')">Images &amp; BIOS Auto-WIM Rules</button>
+    <button class="tab-btn" data-tab="devices" onclick="switchTab('devices')">Hardware Inventory &amp; Boot Queue</button>
+    <button class="tab-btn" data-tab="sync" onclick="switchTab('sync')">Multi-Site Warehouse Sync</button>
     <button class="tab-btn" data-tab="logs" onclick="switchTab('logs')">Server &amp; PXE Logs</button>
-    <button class="tab-btn" data-tab="setup" onclick="switchTab('setup')">Setup &amp; Startup (AlmaLinux 10)</button>
+    <button id="tab-btn-setup" class="tab-btn" data-tab="setup" onclick="switchTab('setup')">Setup &amp; User Access</button>
   </nav>
 
   <main class="container">
     <div id="toast" class="toast hidden"></div>
 
-    <!-- TAB 1: DASHBOARD & LIVE TRANSFERS -->
+    <!-- TAB 1: DASHBOARD & ANALYTICS (Visible in View-Only Mode & Logged-In Mode) -->
     <section id="tab-dashboard" class="tab-panel active">
       <div class="stats-grid">
         <div class="stat-card">
@@ -45,79 +59,182 @@
           <span class="stat-sub" id="stat-ports">TFTP :69 | HTTP :80</span>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Windows WinPE Status</span>
+          <span class="stat-label">WinPE &amp; OS WIM Library</span>
           <strong class="stat-value" id="stat-winpe-status">--</strong>
-          <span class="stat-sub" id="stat-default-wim">Default: boot.wim</span>
+          <span class="stat-sub" id="stat-default-wim">0 OS WIMs configured</span>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Linux Boot Status</span>
-          <strong class="stat-value" id="stat-linux-status">--</strong>
-          <span class="stat-sub">vmlinuz + initrd.img</span>
+          <span class="stat-label">Active Image Downloads</span>
+          <strong class="stat-value" id="stat-active-transfers">0</strong>
+          <span class="stat-sub">Real-time HTTP byte tracking</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Discovered PXE Devices</span>
           <strong class="stat-value" id="stat-device-count">0</strong>
-          <span class="stat-sub">Hardware logged via SMBIOS</span>
+          <span class="stat-sub">Boot-loop protection enabled</span>
+        </div>
+      </div>
+
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Active &amp; Recent Image Downloads</h2>
+              <p class="muted">Live progress of WIM and Linux images streaming to devices</p>
+            </div>
+            <span class="poll-indicator">Live 1.5s</span>
+          </div>
+          <div id="transfers-container">
+            <p class="empty-state">No active image downloads right now.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Hardware Fleet Analytics by Manufacturer</h2>
+              <p class="muted">Breakdown of PXE-discovered machines via SMBIOS</p>
+            </div>
+          </div>
+          <div id="mfg-analytics-container">
+            <p class="empty-state">No hardware telemetry collected yet.</p>
+          </div>
         </div>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div>
-            <h2>Active &amp; Recent Image Downloads</h2>
-            <p class="muted">Real-time progress of WIM and Linux boot images streaming to PXE clients</p>
+            <h2>Recent Device Provisioning Activity (All Nodes)</h2>
+            <p class="muted">Live status of recently booted machines across local and synced warehouse nodes</p>
           </div>
-          <span class="poll-indicator">Auto-refreshing every 1.5s</span>
-        </div>
-        <div id="transfers-container">
-          <p class="empty-state">No active image downloads right now. Boot a PXE client or click "Simulate PXE Client Boot" above.</p>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <h2>Recent Device Activity</h2>
-          <button class="btn btn-sm" onclick="switchTab('devices')">View All Devices →</button>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th>Node / Site</th>
                 <th>MAC Address</th>
                 <th>IP Address</th>
                 <th>Manufacturer &amp; Model</th>
-                <th>Serial</th>
-                <th>Image</th>
+                <th>Serial / BIOS</th>
+                <th>Auto-Matched OS WIM</th>
                 <th>Current Status</th>
                 <th>Last Seen</th>
               </tr>
             </thead>
             <tbody id="dashboard-devices-tbody">
-              <tr><td colspan="7" class="empty-cell">No devices discovered yet.</td></tr>
+              <tr><td colspan="8" class="empty-cell">No devices discovered yet.</td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </section>
 
-    <!-- TAB 2: IMAGE MANAGEMENT -->
+    <!-- TAB 2: IMAGE MANAGEMENT & BIOS AUTO-WIM RULES -->
     <section id="tab-images" class="tab-panel">
+      <!-- CONFIGURED OS DEPLOYMENT WIMS + AUTO RULES -->
       <div class="two-col">
-        <!-- WINDOWS WIM MANAGEMENT -->
         <div class="card">
           <div class="card-header">
             <div>
-              <h2>Windows WinPE &amp; WIM Images</h2>
-              <p class="muted">Directory: <code>http_files/images/winpe/</code></p>
+              <h2>Configured OS Deployment WIMs</h2>
+              <p class="muted">Directory: <code>http_files/images/os/</code> (Applied by WinPE)</p>
+            </div>
+            <span class="badge badge-info">OS WIM Repository</span>
+          </div>
+
+          <form class="upload-box img-perm-only" onsubmit="uploadImage(event, 'os')">
+            <label><strong>Upload Configured Windows OS Image (<code>.wim</code>):</strong></label>
+            <div class="upload-row">
+              <input type="file" id="os-file-input" accept=".wim,.esd,.swm,*" required>
+              <button type="submit" class="btn btn-primary">Upload OS WIM</button>
+            </div>
+            <div id="os-upload-progress" class="upload-status hidden">Uploading...</div>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>OS WIM Filename</th>
+                  <th>Size</th>
+                  <th>Warehouse Sync</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="os-files-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>BIOS Manufacturer / Model &rarr; Auto-WIM Rules</h2>
+              <p class="muted">Automatically tells WinPE which OS WIM to apply based on SMBIOS</p>
+            </div>
+          </div>
+
+          <form class="upload-box img-perm-only" onsubmit="createRule(event)">
+            <label><strong>Add Hardware Auto-Image Rule:</strong></label>
+            <div class="form-row" style="margin-top:0.5rem;">
+              <div class="form-group">
+                <label>Rule Name</label>
+                <input type="text" id="rule-name" placeholder="e.g. All Dell Machines" required>
+              </div>
+              <div class="form-group">
+                <label>BIOS Manufacturer Match</label>
+                <input type="text" id="rule-mfg" placeholder="e.g. Dell" required>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Model Match (<code>*</code> for any)</label>
+                <input type="text" id="rule-model" value="*" required>
+              </div>
+              <div class="form-group">
+                <label>Target OS WIM (in <code>images/os/</code>)</label>
+                <input type="text" id="rule-wim" placeholder="e.g. Dell-Win11.wim" list="os-wim-datalist" required>
+                <datalist id="os-wim-datalist"></datalist>
+              </div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">Add Auto-Image Rule</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Rule Name</th>
+                  <th>Manufacturer</th>
+                  <th>Model</th>
+                  <th>Target OS WIM</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="rules-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- BASE WINPE BOOT ENVIRONMENT & LINUX IMAGES -->
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Base WinPE Boot Environment</h2>
+              <p class="muted">Directory: <code>http_files/images/winpe/</code> (Lightweight PXE Bootloader)</p>
             </div>
             <span id="winpe-ready-badge" class="badge">Checking...</span>
           </div>
 
-          <form class="upload-box" onsubmit="uploadImage(event, 'windows')">
-            <label><strong>Add / Upload Windows Image (<code>.wim</code>) or Boot File:</strong></label>
+          <form class="upload-box img-perm-only" onsubmit="uploadImage(event, 'windows')">
+            <label><strong>Upload Base WinPE <code>boot.wim</code> or Support File:</strong></label>
             <div class="upload-row">
               <input type="file" id="win-file-input" accept=".wim,.sdi,.ini,.bat,*" required>
-              <button type="submit" class="btn btn-primary" id="win-upload-btn">Upload to WinPE</button>
+              <button type="submit" class="btn btn-primary">Upload to WinPE</button>
             </div>
             <div id="win-upload-progress" class="upload-status hidden">Uploading...</div>
           </form>
@@ -128,8 +245,8 @@
                 <tr>
                   <th>Filename</th>
                   <th>Size</th>
-                  <th>Modified</th>
                   <th>Role</th>
+                  <th>Sync</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -138,7 +255,6 @@
           </div>
         </div>
 
-        <!-- LINUX IMAGE MANAGEMENT -->
         <div class="card">
           <div class="card-header">
             <div>
@@ -148,11 +264,11 @@
             <span id="linux-ready-badge" class="badge">Placeholder Mode</span>
           </div>
 
-          <form class="upload-box" onsubmit="uploadImage(event, 'linux')">
-            <label><strong>Add / Upload Linux Kernel (<code>vmlinuz</code>), <code>initrd.img</code>, or Image:</strong></label>
+          <form class="upload-box img-perm-only" onsubmit="uploadImage(event, 'linux')">
+            <label><strong>Upload Linux <code>vmlinuz</code>, <code>initrd.img</code>, or Image:</strong></label>
             <div class="upload-row">
               <input type="file" id="linux-file-input" required>
-              <button type="submit" class="btn btn-primary" id="linux-upload-btn">Upload to Linux</button>
+              <button type="submit" class="btn btn-primary">Upload to Linux</button>
             </div>
             <div id="linux-upload-progress" class="upload-status hidden">Uploading...</div>
           </form>
@@ -163,7 +279,7 @@
                 <tr>
                   <th>Filename</th>
                   <th>Size</th>
-                  <th>Modified</th>
+                  <th>Sync</th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -174,44 +290,145 @@
       </div>
     </section>
 
-    <!-- TAB 3: HARDWARE INVENTORY & DEVICES -->
+    <!-- TAB 3: HARDWARE INVENTORY & BOOT QUEUE -->
     <section id="tab-devices" class="tab-panel">
       <div class="card">
         <div class="card-header">
           <div>
-            <h2>PXE Client Hardware Inventory</h2>
-            <p class="muted">Automatically captured via iPXE SMBIOS inspection (MAC, Manufacturer, Model, Serial, UUID, CPU Arch)</p>
+            <h2>PXE Client Hardware Inventory &amp; One-Time Next-Boot Queue</h2>
+            <p class="muted">Shows all devices imaged locally and across synced warehouse nodes. Default menu timeout boots to Local Disk.</p>
           </div>
+          <button class="btn btn-secondary btn-sm" onclick="pullNodesDBNow()" title="Immediately pull imaged device records and logs from all registered warehouse nodes">
+            📥 Force Real-Time DB Sync
+          </button>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>MAC Address</th>
-                <th>IP Address</th>
-                <th>Manufacturer</th>
-                <th>Model / Product</th>
-                <th>Serial Number</th>
-                <th>Arch</th>
-                <th>Boots</th>
-                <th>Current Status &amp; Progress</th>
-                <th>Last Seen</th>
+                <th>Node / Site</th>
+                <th>MAC &amp; IP</th>
+                <th>Manufacturer &amp; Model</th>
+                <th>Serial &amp; Asset Tag</th>
+                <th>BIOS &amp; NIC Chip</th>
+                <th>Matched OS WIM</th>
+                <th>Status</th>
+                <th>Queue Next Boot (One-Time)</th>
               </tr>
             </thead>
             <tbody id="devices-tbody">
-              <tr><td colspan="9" class="empty-cell">No PXE devices have checked in yet.</td></tr>
+              <tr><td colspan="8" class="empty-cell">No PXE devices have checked in yet.</td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </section>
 
-    <!-- TAB 4: LOGS -->
+    <!-- TAB 4: MULTI-SITE WAREHOUSE SYNC -->
+    <section id="tab-sync" class="tab-panel">
+      <div class="two-col">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Remote Warehouse / Branch Nodes</h2>
+              <p class="muted">Distribute "Sync-Flagged" images to warehouses &amp; pull remote device DB records back to master</p>
+            </div>
+            <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
+              <button class="btn btn-secondary btn-sm" onclick="pullNodesDBNow()" title="Force an immediate real-time pull of device records &amp; logs from all warehouse nodes">
+                📥 Pull Warehouse DB Now
+              </button>
+              <button class="btn btn-primary btn-sm img-perm-only" onclick="syncNodesNow()" title="Push all Sync-Flagged images &amp; rules AND pull remote warehouse device databases">
+                🔄 Full Image + DB Sync Now
+              </button>
+            </div>
+          </div>
+
+          <form class="upload-box settings-perm-only" onsubmit="createNode(event)">
+            <label><strong>Register Remote Warehouse Node:</strong></label>
+            <div class="form-row" style="margin-top:0.5rem;">
+              <div class="form-group">
+                <label>Warehouse Node Name</label>
+                <input type="text" id="node-name" placeholder="e.g. Warehouse 1 - East" required>
+              </div>
+              <div class="form-group">
+                <label>Remote Go Server URL</label>
+                <input type="text" id="node-url" placeholder="http://10.20.1.10:80" required>
+              </div>
+              <div class="form-group">
+                <label>Remote Node Sync Key</label>
+                <input type="text" id="node-key" placeholder="Paste remote node's sync_secret" required>
+              </div>
+            </div>
+            <button type="submit" class="btn btn-secondary btn-sm">Add Warehouse Node</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Warehouse Node</th>
+                  <th>Server URL</th>
+                  <th>Last Sync</th>
+                  <th>Status &amp; Progress</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="nodes-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Sync Policy, Throttling &amp; Credentials</h2>
+              <p class="muted">Configure daily schedule (default <code>02:00</code> AM), WAN bandwidth caps, and rule replication</p>
+            </div>
+          </div>
+
+          <p class="help-text">
+            <strong>This Node's Sync Key (<code>sync_secret</code>):</strong>
+            <code id="this-node-sync-key" class="sync-key-box">Hidden</code>
+          </p>
+
+          <form class="upload-box settings-perm-only" style="margin-top:0.85rem;" onsubmit="saveSyncPolicy(event)">
+            <label><strong>Multi-Site Sync Policy:</strong></label>
+            <div class="form-row" style="margin-top:0.5rem;">
+              <div class="form-group">
+                <label for="cfg-sync-schedule">Daily Schedule (`02:00`), `realtime`, or `disabled`</label>
+                <input type="text" id="cfg-sync-schedule" placeholder="02:00 or realtime" value="02:00" required>
+              </div>
+              <div class="form-group">
+                <label for="cfg-sync-mbps">Max WAN Sync Speed (MB/s, `0` = Unlimited)</label>
+                <input type="number" id="cfg-sync-mbps" min="0" step="1" value="0" required>
+              </div>
+            </div>
+            <div class="form-group checkbox-group">
+              <input type="checkbox" id="cfg-sync-rules" checked>
+              <label for="cfg-sync-rules">Automatically replicate BIOS Manufacturer/Model &rarr; WIM rules to warehouse nodes</label>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">Save Sync Policy</button>
+          </form>
+
+          <p class="help-text" style="margin-top: 0.75rem;">
+            <strong>Production Sync Safeguards Active:</strong>
+          </p>
+          <ul class="bullet-list">
+            <li><strong>SHA-256 Deduplication:</strong> Checks each warehouse's <code>/api/sync/manifest</code> first and skips files that already match size &amp; SHA-256.</li>
+            <li><strong>Resumable Transfers &amp; Atomic Rename:</strong> Writes to <code>.sync.part</code> and resumes from the exact byte offset if a VPN link drops, verifying full SHA-256 before replacing the live WIM.</li>
+            <li><strong>Warehouse &rarr; Master DB Sync:</strong> Automatically pulls all imaged device records and logs during the daily 2:00 AM sync (or anytime via the real-time button).</li>
+            <li><strong>Rule Sync:</strong> Keeps BIOS Manufacturer/Model auto-imaging rules identical across all warehouse servers.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 5: LOGS -->
     <section id="tab-logs" class="tab-panel">
       <div class="card">
         <div class="card-header">
           <div>
-            <h2>Server, PXE, TFTP &amp; Imaging Event Logs</h2>
+            <h2>Server, PXE, TFTP, Sync &amp; Imaging Event Logs</h2>
             <p class="muted">Stored in SQLite (<code>imaging.db</code>)</p>
           </div>
           <div class="filter-group">
@@ -220,6 +437,8 @@
               <option value="ALL">All Categories</option>
               <option value="PXE">PXE &amp; Hardware Discovery</option>
               <option value="IMAGING">Imaging &amp; Transfers</option>
+              <option value="SYNC">Multi-Site Node Sync</option>
+              <option value="AUTH">User Authentication</option>
               <option value="TFTP">TFTP Server</option>
               <option value="HTTP">HTTP Requests</option>
               <option value="IMAGE">Image Management</option>
@@ -245,16 +464,77 @@
       </div>
     </section>
 
-    <!-- TAB 5: SETUP & ALMALINUX STARTUP -->
+    <!-- TAB 6: SETUP & USER MANAGEMENT -->
     <section id="tab-setup" class="tab-panel">
       <div class="two-col">
+        <!-- WEB UI USER MANAGEMENT -->
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>Web UI User Management &amp; Privileges</h2>
+              <p class="muted">Define who can add/remove images, queue devices, or modify server settings</p>
+            </div>
+          </div>
+
+          <form class="upload-box" onsubmit="saveUser(event)">
+            <label><strong>Add or Update User Account:</strong></label>
+            <div class="form-row" style="margin-top:0.5rem;">
+              <div class="form-group">
+                <label>Username</label>
+                <input type="text" id="usr-username" placeholder="e.g. tech1" required>
+              </div>
+              <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="usr-password" placeholder="Initial password" required>
+              </div>
+              <div class="form-group">
+                <label>Role</label>
+                <select id="usr-role" onchange="onRoleSelectChange()">
+                  <option value="operator">Operator (Provisioning Tech)</option>
+                  <option value="viewer">Viewer (Read-Only Details)</option>
+                  <option value="admin">Administrator (Full Access)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group checkbox-group">
+              <input type="checkbox" id="usr-can-images">
+              <label for="usr-can-images">Allow adding &amp; removing WIM/Linux images and BIOS Auto-Rules</label>
+            </div>
+            <div class="form-group checkbox-group">
+              <input type="checkbox" id="usr-must-reset" checked>
+              <label for="usr-must-reset">Prompt user to reset password on their first login</label>
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">Save User Account</button>
+          </form>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Username</th>
+                  <th>Role</th>
+                  <th>Add/Remove Images</th>
+                  <th>Password Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="users-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- SERVER CONFIG -->
         <div class="card">
           <div class="card-header">
             <div>
               <h2>Server Network &amp; Boot Setup</h2>
-              <p class="muted">Updates <code>config.json</code> and regenerates <code>tftp_files/boot.ipxe</code> automatically</p>
+              <p class="muted">Updates <code>config.json</code>, syncs <code>tftp_files/boot.ipxe</code>, or runs root <code>./update.sh</code></p>
             </div>
+            <button type="button" class="btn btn-secondary btn-sm settings-perm-only" onclick="runSystemUpdate()" title="Execute ./update.sh in the repo root (git pull, build/update, restart systemd services)">
+              🚀 Run update.sh (Update App)
+            </button>
           </div>
+          <div id="update-script-output" class="upload-box hidden" style="margin-bottom:0.85rem; font-family:monospace; font-size:0.82rem; white-space:pre-wrap;"></div>
           <form id="settings-form" onsubmit="saveSettings(event)" class="settings-form">
             <div class="form-group">
               <label>Detected Network Interfaces (Click to fill Server IP):</label>
@@ -263,11 +543,15 @@
 
             <div class="form-row">
               <div class="form-group">
+                <label for="cfg-node-name">Node / Site Name</label>
+                <input type="text" id="cfg-node-name" required>
+              </div>
+              <div class="form-group">
                 <label for="cfg-server-ip">Server IPv4 Address</label>
                 <input type="text" id="cfg-server-ip" required>
               </div>
               <div class="form-group">
-                <label for="cfg-default-wim">Default Windows WIM Filename</label>
+                <label for="cfg-default-wim">Default WinPE Boot WIM</label>
                 <input type="text" id="cfg-default-wim" required>
               </div>
             </div>
@@ -278,59 +562,79 @@
                 <input type="number" id="cfg-tftp-port" required>
               </div>
               <div class="form-group">
-                <label for="cfg-http-port">HTTP Boot &amp; API Port (TCP)</label>
+                <label for="cfg-http-port">HTTP Boot &amp; API Port</label>
                 <input type="number" id="cfg-http-port" required>
               </div>
               <div class="form-group">
-                <label for="cfg-ruby-port">Ruby Web UI Port (TCP)</label>
+                <label for="cfg-ruby-port">Ruby Web UI Port</label>
                 <input type="number" id="cfg-ruby-port" required>
               </div>
             </div>
 
             <div class="form-row">
               <div class="form-group">
-                <label for="cfg-timeout">iPXE Boot Menu Timeout (ms)</label>
+                <label for="cfg-timeout">iPXE Menu Timeout (ms)</label>
                 <input type="number" id="cfg-timeout" step="1000" min="1000" required>
               </div>
               <div class="form-group">
-                <label for="cfg-linux-args">Linux Kernel Boot Arguments</label>
+                <label for="cfg-linux-args">Linux Kernel Args</label>
                 <input type="text" id="cfg-linux-args">
               </div>
             </div>
 
             <div class="form-group checkbox-group">
               <input type="checkbox" id="cfg-autolaunch">
-              <label for="cfg-autolaunch">Inject <code>winpeshl.ini</code> &amp; <code>install.bat</code> into WinPE automatically (reports status webhook back to server)</label>
+              <label for="cfg-autolaunch">Inject <code>winpeshl.ini</code> &amp; <code>install.bat</code> into WinPE automatically</label>
             </div>
 
             <button type="submit" class="btn btn-primary">Save Configuration &amp; Sync iPXE Scripts</button>
           </form>
         </div>
-
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <h2>AlmaLinux 10 Startup &amp; Firewall Setup</h2>
-              <p class="muted">Run at startup via <code>systemd</code> + open ports in <code>firewalld</code></p>
-            </div>
-          </div>
-          <p class="help-text">
-            Every time configuration is saved, the Go server writes an executable setup script at
-            <code>ipxe-server/setup-almalinux.sh</code>. Run it once as root on AlmaLinux 10 to register both the Go server and Ruby Web UI to start automatically at boot:
-          </p>
-          <pre class="code-block">cd ipxe-server
-sudo ./setup-almalinux.sh
-sudo systemctl start lets-go-imaging lets-go-imaging-web</pre>
-
-          <h3>Generated <code>lets-go-imaging.service</code> (Go Server)</h3>
-          <pre class="code-block" id="systemd-go-preview">Loading...</pre>
-
-          <h3>Generated <code>lets-go-imaging-web.service</code> (Ruby Web UI)</h3>
-          <pre class="code-block" id="systemd-ruby-preview">Loading...</pre>
-        </div>
       </div>
     </section>
   </main>
+
+  <!-- LOGIN MODAL -->
+  <div id="login-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3>Sign In to Lets Go Imaging</h3>
+      <p class="muted" style="margin-bottom:1rem;">Default initial login: <code>admin</code> / <code>admin123</code></p>
+      <form onsubmit="submitLogin(event)">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="login-username" required autofocus>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="login-password" required>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeLoginModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Sign In</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- FORCED / VOLUNTARY PASSWORD RESET MODAL -->
+  <div id="password-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <h3 id="password-modal-title">Reset Your Password</h3>
+      <p id="password-modal-desc" class="muted" style="margin-bottom:1rem;">
+        Please choose a new password for your account.
+      </p>
+      <form onsubmit="submitPasswordChange(event)">
+        <div class="form-group">
+          <label>New Password</label>
+          <input type="password" id="new-password-input" minlength="4" required>
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="password-cancel-btn" class="btn btn-secondary" onclick="closePasswordModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save New Password</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script src="/app.js"></script>
 </body>
