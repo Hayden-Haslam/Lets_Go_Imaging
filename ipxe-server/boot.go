@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // handleBootMenu serves /boot/menu.ipxe dynamically over HTTP and records hardware info.
@@ -13,15 +15,12 @@ func handleBootMenu(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	q := r.URL.Query()
 
-	mac := normalizeMAC(q.Get("mac"))
-	ip := q.Get("ip")
-	if ip == "" {
-		ip = cleanClientIP(r.RemoteAddr)
-	}
+	mac := parseIPXEMAC(q.Get("mac"))
+	ip := parseIPXEIP(q.Get("ip"), r.RemoteAddr)
 	mfg := cleanField(q.Get("mfg"))
 	model := cleanField(q.Get("product"))
 	serial := cleanField(q.Get("serial"))
-	uuid := cleanField(q.Get("uuid"))
+	uuid := parseIPXEUUID(q.Get("uuid"))
 	arch := cleanField(q.Get("arch"))
 
 	UpsertDevice(mac, ip, mfg, model, serial, uuid, arch, "At iPXE Boot Menu", "")
@@ -37,22 +36,29 @@ func handleBootMenu(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		itemKey := fmt.Sprintf("winpe_%d", idx)
-		extraWimMenuItems.WriteString(fmt.Sprintf("item %s   Boot Windows WinPE (%s)\n", itemKey, wim))
+		extraWimMenuItems.WriteString(fmt.Sprintf("item %-10s Boot Windows WinPE (%s)\n", itemKey, wim))
 		extraWimTargets.WriteString(fmt.Sprintf(":%s\nchain %s/boot/winpe.ipxe?mac=%s&wim=%s || goto MENU\n\n", itemKey, baseURL, mac, wim))
+	}
+
+	// Keep header & gap lines well under 78 characters so 80x25 BIOS/UEFI consoles never truncate
+	hostLine := fmt.Sprintf("Device: %s %s (%s)", mfg, model, mac)
+	if len(hostLine) > 74 {
+		hostLine = hostLine[:74]
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	script := fmt.Sprintf(`#!ipxe
 
 :MENU
-menu Lets Go Imaging - Network Boot Menu [%s %s | MAC: %s]
+menu Lets Go Imaging - Network Boot Menu (%s)
+item --gap -- %s
 item --gap -- ---------------- Operating System Deployment ----------------
-item winpe    Boot Windows Environment (WinPE - %s)
-%sitem linux    Boot Linux Installer / Live Environment
+item winpe      Boot Windows Environment (WinPE - %s)
+%sitem linux      Boot Linux Installer / Live Environment
 item --gap -- ---------------- Diagnostics & Utilities --------------------
-item hwinfo   View Detected Device Hardware Info
-item shell    Drop to iPXE Command Shell
-item exit     Exit & Continue Local Disk Boot
+item hwinfo     View Detected Device Hardware Info
+item shell      Drop to iPXE Command Shell
+item exit       Exit & Continue Local Disk Boot
 
 choose --default winpe --timeout %d target && goto ${target} || goto MENU
 
@@ -85,7 +91,7 @@ goto MENU
 
 :exit
 exit
-`, mfg, model, mac, cfg.DefaultWim, extraWimMenuItems.String(), cfg.MenuTimeoutMs, cfg.DefaultWim, baseURL, mac, cfg.DefaultWim, extraWimTargets.String(), baseURL, mac, mac, ip, mfg, model, serial, uuid, arch)
+`, ip, hostLine, cfg.DefaultWim, extraWimMenuItems.String(), cfg.MenuTimeoutMs, cfg.DefaultWim, baseURL, mac, cfg.DefaultWim, extraWimTargets.String(), baseURL, mac, mac, ip, mfg, model, serial, uuid, arch)
 
 	_, _ = w.Write([]byte(script))
 }
@@ -93,7 +99,7 @@ exit
 // handleBootWinPE serves /boot/winpe.ipxe dynamically for loading wimboot + WinPE files over HTTP.
 func handleBootWinPE(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
-	mac := normalizeMAC(r.URL.Query().Get("mac"))
+	mac := parseIPXEMAC(r.URL.Query().Get("mac"))
 	ip := cleanClientIP(r.RemoteAddr)
 	wimName := filepath.Base(r.URL.Query().Get("wim"))
 	if wimName == "" || wimName == "." || wimName == "/" {
@@ -103,6 +109,7 @@ func handleBootWinPE(w http.ResponseWriter, r *http.Request) {
 	baseURL := serverBaseURL(cfg, r)
 	winpeDir := filepath.Join(cfg.HTTPDir, "images", "winpe")
 	wimPath := filepath.Join(winpeDir, wimName)
+	returnMenuURL := fmt.Sprintf("%s/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}", baseURL)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 
@@ -117,8 +124,8 @@ echo  Upload '%s' via the Lets Go Imaging Web UI (http://%s:%d)
 echo  or place it inside %s/images/winpe/ on the server.
 echo =====================================================================
 prompt Press any key to return to the boot menu...
-chain %s/boot/menu.ipxe?mac=%s
-`, wimName, wimName, cfg.ServerIP, cfg.RubyWebPort, cfg.HTTPDir, baseURL, mac)
+chain %s
+`, wimName, wimName, cfg.ServerIP, cfg.RubyWebPort, cfg.HTTPDir, returnMenuURL)
 		_, _ = w.Write([]byte(missingScript))
 		return
 	}
@@ -149,8 +156,8 @@ boot || goto failed
 :failed
 echo [ERROR] WinPE boot failed! Returning to menu in 5 seconds...
 sleep 5
-chain %s/boot/menu.ipxe?mac=%s
-`, baseURL, wimName, autoLines, wimName, baseURL, mac)
+chain %s
+`, baseURL, wimName, autoLines, wimName, returnMenuURL)
 
 	_, _ = w.Write([]byte(script))
 }
@@ -159,9 +166,10 @@ chain %s/boot/menu.ipxe?mac=%s
 // or presenting a clear placeholder screen if Linux boot artifacts have not been uploaded yet.
 func handleBootLinux(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
-	mac := normalizeMAC(r.URL.Query().Get("mac"))
+	mac := parseIPXEMAC(r.URL.Query().Get("mac"))
 	ip := cleanClientIP(r.RemoteAddr)
 	baseURL := serverBaseURL(cfg, r)
+	returnMenuURL := fmt.Sprintf("%s/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring}", baseURL)
 
 	linuxDir := filepath.Join(cfg.HTTPDir, "images", "linux")
 	kernelPath := filepath.Join(linuxDir, "vmlinuz")
@@ -185,8 +193,8 @@ echo  'initrd.img' in the Web Management Portal:
 echo    http://%s:%d -> Images -> Linux Images
 echo =====================================================================
 prompt Press any key to return to the main boot menu...
-chain %s/boot/menu.ipxe?mac=%s
-`, cfg.HTTPDir, cfg.ServerIP, cfg.RubyWebPort, baseURL, mac)
+chain %s
+`, cfg.HTTPDir, cfg.ServerIP, cfg.RubyWebPort, returnMenuURL)
 		_, _ = w.Write([]byte(placeholderScript))
 		return
 	}
@@ -209,8 +217,8 @@ boot || goto failed
 :failed
 echo [ERROR] Booting Linux failed, returning to menu...
 sleep 4
-chain %s/boot/menu.ipxe?mac=%s
-`, baseURL, cfg.LinuxKernelArgs, baseURL, mac)
+chain %s
+`, baseURL, cfg.LinuxKernelArgs, returnMenuURL)
 
 	_, _ = w.Write([]byte(script))
 }
@@ -219,7 +227,7 @@ chain %s/boot/menu.ipxe?mac=%s
 // imaging status back to the Go server over HTTP.
 func handleWinPEInstallBat(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
-	mac := normalizeMAC(r.URL.Query().Get("mac"))
+	mac := parseIPXEMAC(r.URL.Query().Get("mac"))
 	baseURL := serverBaseURL(cfg, r)
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -236,6 +244,61 @@ echo ================================================================
 cmd.exe
 `, baseURL, mac, baseURL, mac)
 	_, _ = w.Write([]byte(bat))
+}
+
+// parseIPXEMAC handles both standard ASCII MAC strings ("00:15:5d:8a:4f:21")
+// and raw 6-byte binary MACs if a client used ${net0/mac:uristring}.
+func parseIPXEMAC(raw string) string {
+	if len(raw) == 6 && !isPrintableASCII(raw) {
+		b := []byte(raw)
+		return fmt.Sprintf("%02X:%02X:%02X:%02X:%02X:%02X", b[0], b[1], b[2], b[3], b[4], b[5])
+	}
+	cleaned := normalizeMAC(raw)
+	if !isPrintableASCII(cleaned) {
+		return ""
+	}
+	return cleaned
+}
+
+// parseIPXEIP handles both standard ASCII IPv4 strings and raw 4-byte binary IPv4s,
+// falling back to the HTTP request's RemoteAddr if needed.
+func parseIPXEIP(raw string, remoteAddr string) string {
+	if len(raw) == 4 && !isPrintableASCII(raw) {
+		b := []byte(raw)
+		return net.IPv4(b[0], b[1], b[2], b[3]).String()
+	}
+	trimmed := strings.TrimSpace(raw)
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return ip.String()
+	}
+	return cleanClientIP(remoteAddr)
+}
+
+// parseIPXEUUID handles both standard ASCII UUID strings and raw 16-byte binary UUIDs.
+func parseIPXEUUID(raw string) string {
+	if len(raw) == 16 && !isPrintableASCII(raw) {
+		b := []byte(raw)
+		return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+			b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	}
+	cleaned := cleanField(raw)
+	if !isPrintableASCII(cleaned) {
+		return "Unknown"
+	}
+	return cleaned
+}
+
+func isPrintableASCII(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 32 || c > 126 || !unicode.IsPrint(rune(c)) {
+			return false
+		}
+	}
+	return true
 }
 
 func serverBaseURL(cfg ServerConfig, r *http.Request) string {

@@ -1,34 +1,33 @@
 #!ipxe
 
+isset ${next-server} || set next-server 192.168.1.10
 set boot-url http://${next-server}
 
-:MENU
-menu 
-item --gap ***************** iPXE Boot Server *****************
-item winpe Boot Windows Installer
-item linux Boot Linux Installer
-item shell iPXE Shell
-item exit Exit
+echo ==========================================================
+echo  Lets Go Imaging - Collecting Hardware Info & Connecting...
+echo  MAC: ${net0/mac} | IP: ${ip}
+echo  Model: ${manufacturer} ${product}
+echo ==========================================================
 
-choose --default return --timeout 5000 target && goto ${target}
+chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring} || goto fallback
+
+:fallback
+echo Dynamic HTTP menu unreachable on ${boot-url}, falling back to local static menu...
+menu Lets Go Imaging (Fallback Mode)
+item winpe Boot Windows Installer (WinPE)
+item linux Boot Linux Installer
+item shell Drop to iPXE Shell
+item exit  Exit to Local Boot
+choose --default winpe --timeout 10000 target && goto ${target}
 
 :winpe
-echo Booting to Windows Installer
-chain tftp://${next-server}/winpe.ipxe
-goto MENU
+chain tftp://${next-server}/winpe.ipxe || goto fallback
 
 :linux
-echo Booting to Linux Installer
-chain tftp://${next-server}/linux.ipxe
-goto MENU
-
+chain tftp://${next-server}/linux.ipxe || goto fallback
 
 :shell
-shell ||
-goto MENU
+shell
 
 :exit
 exit
-
-:return
-autoboot

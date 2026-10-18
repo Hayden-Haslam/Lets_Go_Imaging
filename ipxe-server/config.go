@@ -139,11 +139,14 @@ set boot-url http://${next-server}%s
 
 echo ==========================================================
 echo  Lets Go Imaging - Collecting Hardware Info & Connecting...
-echo  MAC: ${net0/mac} | Manufacturer: ${manufacturer} | Model: ${product}
+echo  MAC: ${net0/mac} | IP: ${ip}
+echo  Model: ${manufacturer} ${product}
 echo ==========================================================
 
-chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac:uristring}&ip=${ip:uristring}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid:uristring}&arch=${buildarch:uristring} || goto fallback
+chain ${boot-url}/boot/menu.ipxe?mac=${net0/mac}&ip=${ip}&mfg=${manufacturer:uristring}&product=${product:uristring}&serial=${serial:uristring}&uuid=${uuid}&arch=${buildarch:uristring} || goto fallback
+`, cfg.ServerIP, cfg.ServerIP, portPart)
 
+	script += fmt.Sprintf(`
 :fallback
 echo Dynamic HTTP menu unreachable on ${boot-url}, falling back to local static menu...
 menu Lets Go Imaging (Fallback Mode)
@@ -164,7 +167,7 @@ shell
 
 :exit
 exit
-`, cfg.ServerIP, cfg.ServerIP, portPart, cfg.MenuTimeoutMs)
+`, cfg.MenuTimeoutMs)
 
 	bootIpxePath := filepath.Join(cfg.TFTPDir, "boot.ipxe")
 	return os.WriteFile(bootIpxePath, []byte(script), 0644)

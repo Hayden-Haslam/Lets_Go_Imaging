@@ -106,6 +106,9 @@ func InitDB(dbPath string) error {
 		return err
 	}
 
+	// Clean up any legacy rows that had binary-encoded MAC/IP or ip- fallback keys
+	_, _ = db.Exec(`DELETE FROM devices WHERE mac LIKE 'ip-%' OR length(mac) < 12`)
+
 	dbConn = db
 	return nil
 }
@@ -129,9 +132,10 @@ func RecordLog(level, category, deviceMAC, clientIP, message string) {
 
 // UpsertDevice registers or updates a PXE client's hardware inventory in SQLite.
 func UpsertDevice(mac, ip, manufacturer, model, serial, uuid, arch, status, image string) {
-	mac = normalizeMAC(mac)
+	mac = parseIPXEMAC(mac)
+	ip = cleanClientIP(ip)
 	if mac == "" {
-		mac = "ip-" + cleanClientIP(ip)
+		mac = "ip-" + ip
 	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 
@@ -139,13 +143,19 @@ func UpsertDevice(mac, ip, manufacturer, model, serial, uuid, arch, status, imag
 		return
 	}
 
+	mfg := cleanField(manufacturer)
+	mdl := cleanField(model)
+	ser := cleanField(serial)
+	uid := cleanField(uuid)
+	ar := cleanField(arch)
+
 	var existingCount int
 	err := dbConn.QueryRow(`SELECT boot_count FROM devices WHERE mac = ?`, mac).Scan(&existingCount)
 	if err == sql.ErrNoRows {
 		_, err = dbConn.Exec(`
 			INSERT INTO devices (mac, ip, manufacturer, model, serial, uuid, arch, first_seen, last_seen, boot_count, current_status, current_image, progress_pct)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 0)
-		`, mac, cleanClientIP(ip), cleanField(manufacturer), cleanField(model), cleanField(serial), cleanField(uuid), cleanField(arch), now, now, status, image)
+		`, mac, ip, mfg, mdl, ser, uid, ar, now, now, status, image)
 		if err != nil {
 			log.Printf("[DB] Insert device error: %v", err)
 		}
@@ -155,23 +165,23 @@ func UpsertDevice(mac, ip, manufacturer, model, serial, uuid, arch, status, imag
 	_, err = dbConn.Exec(`
 		UPDATE devices SET
 			ip = CASE WHEN ? != '' THEN ? ELSE ip END,
-			manufacturer = CASE WHEN ? != '' THEN ? ELSE manufacturer END,
-			model = CASE WHEN ? != '' THEN ? ELSE model END,
-			serial = CASE WHEN ? != '' THEN ? ELSE serial END,
-			uuid = CASE WHEN ? != '' THEN ? ELSE uuid END,
-			arch = CASE WHEN ? != '' THEN ? ELSE arch END,
+			manufacturer = CASE WHEN ? != '' AND ? != 'Unknown' THEN ? ELSE manufacturer END,
+			model = CASE WHEN ? != '' AND ? != 'Unknown' THEN ? ELSE model END,
+			serial = CASE WHEN ? != '' AND ? != 'Unknown' THEN ? ELSE serial END,
+			uuid = CASE WHEN ? != '' AND ? != 'Unknown' THEN ? ELSE uuid END,
+			arch = CASE WHEN ? != '' AND ? != 'Unknown' THEN ? ELSE arch END,
 			last_seen = ?,
 			boot_count = boot_count + 1,
 			current_status = CASE WHEN ? != '' THEN ? ELSE current_status END,
 			current_image = CASE WHEN ? != '' THEN ? ELSE current_image END
 		WHERE mac = ?
 	`,
-		cleanClientIP(ip), cleanClientIP(ip),
-		cleanField(manufacturer), cleanField(manufacturer),
-		cleanField(model), cleanField(model),
-		cleanField(serial), cleanField(serial),
-		cleanField(uuid), cleanField(uuid),
-		cleanField(arch), cleanField(arch),
+		ip, ip,
+		mfg, mfg, mfg,
+		mdl, mdl, mdl,
+		ser, ser, ser,
+		uid, uid, uid,
+		ar, ar, ar,
 		now,
 		status, status,
 		image, image,
